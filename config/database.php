@@ -59,8 +59,8 @@ return [
             'prefix_indexes' => true,
             'strict' => true,
             'engine' => null,
-            'options' => (extension_loaded('pdo_mysql') && !empty(env('MYSQL_ATTR_SSL_CA'))) ? [
-                (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA'),
+            'options' => (extension_loaded('pdo_mysql') && !in_array(env('DB_HOST', '127.0.0.1'), ['127.0.0.1', 'localhost'], true)) ? [
+                (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_CA : PDO::MYSQL_ATTR_SSL_CA) => env('MYSQL_ATTR_SSL_CA', '/dev/null'),
                 (PHP_VERSION_ID >= 80500 ? Mysql::ATTR_SSL_VERIFY_SERVER_CERT : PDO::MYSQL_ATTR_SSL_VERIFY_SERVER_CERT) => false,
             ] : [],
         ],
