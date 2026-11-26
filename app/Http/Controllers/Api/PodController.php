@@ -6,10 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Models\ProofOfDelivery;
 use App\Models\Shipment;
 use App\Models\TrackingLog;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Facades\Storage;
 
 class PodController extends Controller
 {
@@ -21,6 +21,37 @@ class PodController extends Controller
     public function submit(Request $request, $shipment)
     {
         return $this->savePod($request, $shipment);
+    }
+
+    public function photo($podId, $index = 0)
+    {
+        $pod = ProofOfDelivery::findOrFail($podId);
+        $photos = json_decode($pod->photo_data ?? '[]', true);
+        $dataUri = $photos[(int) $index] ?? null;
+
+        return $this->streamDataUri($dataUri);
+    }
+
+    public function signature($podId)
+    {
+        $pod = ProofOfDelivery::findOrFail($podId);
+        return $this->streamDataUri($pod->signature_data ?? null);
+    }
+
+    private function streamDataUri(?string $dataUri)
+    {
+        if (!$dataUri || !preg_match('/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/', $dataUri, $matches)) {
+            abort(404);
+        }
+
+        $binary = base64_decode($matches[2], true);
+        if ($binary === false) {
+            abort(404);
+        }
+
+        return response($binary, 200)
+            ->header('Content-Type', $matches[1])
+            ->header('Cache-Control', 'public, max-age=86400');
     }
 
     private function savePod(Request $request, $shipment)
@@ -58,34 +89,50 @@ class PodController extends Controller
             ], 422);
         }
 
-        return DB::transaction(function () use ($request, $shipmentModel) {
-            $savedPhotos = [];
-
-            if ($request->hasFile('photos')) {
-                foreach ($request->file('photos') as $file) {
-                    $savedPhotos[] = $file->store('pods/photos', 'public');
+        // Pastikan kolom LONGTEXT tersedia di TiDB Cloud sebelum transaksi dimulai
+        if (!Schema::hasColumn('proof_of_deliveries', 'photo_data') || !Schema::hasColumn('proof_of_deliveries', 'signature_data')) {
+            Schema::table('proof_of_deliveries', function (Blueprint $table) {
+                if (!Schema::hasColumn('proof_of_deliveries', 'photo_data')) {
+                    $table->longText('photo_data')->nullable();
                 }
-            } elseif ($request->hasFile('photo')) {
-                $savedPhotos[] = $request->file('photo')->store('pods/photos', 'public');
+                if (!Schema::hasColumn('proof_of_deliveries', 'signature_data')) {
+                    $table->longText('signature_data')->nullable();
+                }
+            });
+        }
+
+        return DB::transaction(function () use ($request, $shipmentModel) {
+            $photoDataUris = [];
+            $files = $request->hasFile('photos')
+                ? $request->file('photos')
+                : ($request->hasFile('photo') ? [$request->file('photo')] : []);
+
+            foreach ($files as $file) {
+                $mime = $file->getMimeType() ?: 'image/jpeg';
+                $bytes = file_get_contents($file->getRealPath());
+                $photoDataUris[] = 'data:' . $mime . ';base64,' . base64_encode($bytes);
             }
 
-            $signatureRelativePath = null;
+            $signatureDataUri = null;
             if ($request->filled('signature_base64')) {
-                $base64Str = $request->input('signature_base64');
-                if (str_contains($base64Str, ',')) {
-                    $base64Str = explode(',', $base64Str, 2)[1];
+                $rawSig = trim($request->input('signature_base64'));
+                if (str_starts_with($rawSig, 'data:image/')) {
+                    $signatureDataUri = $rawSig;
+                } else {
+                    $decodedBytes = base64_decode($rawSig, true);
+                    if ($decodedBytes === false) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Format tanda tangan tidak valid.',
+                        ], 422);
+                    }
+                    $signatureDataUri = 'data:image/png;base64,' . base64_encode($decodedBytes);
                 }
-                $decodedBytes = base64_decode($base64Str, true);
-                if ($decodedBytes === false) {
-                    return response()->json([
-                        'success' => false,
-                        'message' => 'Format tanda tangan tidak valid.',
-                    ], 422);
-                }
-                $signatureRelativePath = 'pods/signatures/' . uniqid('sig_', true) . '.png';
-                Storage::disk('public')->put($signatureRelativePath, $decodedBytes);
             } elseif ($request->hasFile('signature')) {
-                $signatureRelativePath = $request->file('signature')->store('pods/signatures', 'public');
+                $sigFile = $request->file('signature');
+                $sigMime = $sigFile->getMimeType() ?: 'image/png';
+                $sigBytes = file_get_contents($sigFile->getRealPath());
+                $signatureDataUri = 'data:' . $sigMime . ';base64,' . base64_encode($sigBytes);
             }
 
             $podData = [
@@ -94,6 +141,8 @@ class PodController extends Controller
                 'recipient_relation' => $request->recipient_relation,
                 'notes'              => $request->notes,
                 'delivered_at'       => now(),
+                'photo_data'         => json_encode($photoDataUris),
+                'signature_data'     => $signatureDataUri,
             ];
 
             if (Schema::hasColumn('proof_of_deliveries', 'courier_id')) {
@@ -109,23 +158,34 @@ class PodController extends Controller
                 $podData['longitude'] = $request->longitude;
             }
 
-            $encodedPhotos = json_encode($savedPhotos);
-            if (Schema::hasColumn('proof_of_deliveries', 'photo_url')) {
-                $podData['photo_url'] = $encodedPhotos;
-            } elseif (Schema::hasColumn('proof_of_deliveries', 'photo_path')) {
-                $podData['photo_path'] = $encodedPhotos;
-            }
-
-            if (Schema::hasColumn('proof_of_deliveries', 'signature_url')) {
-                $podData['signature_url'] = $signatureRelativePath;
-            } elseif (Schema::hasColumn('proof_of_deliveries', 'signature_path')) {
-                $podData['signature_path'] = $signatureRelativePath;
-            }
-
             $pod = ProofOfDelivery::updateOrCreate(
                 ['shipment_id' => $shipmentModel->id],
                 $podData
             );
+
+            $host = rtrim($request->getSchemeAndHttpHost(), '/');
+            $photoUrls = [];
+            foreach (array_keys($photoDataUris) as $idx) {
+                $photoUrls[] = "{$host}/api/pods/{$pod->id}/photo/{$idx}";
+            }
+            $signatureUrl = "{$host}/api/pods/{$pod->id}/signature";
+
+            $urlUpdates = [];
+            if (Schema::hasColumn('proof_of_deliveries', 'photo_url')) {
+                $urlUpdates['photo_url'] = json_encode($photoUrls);
+            } elseif (Schema::hasColumn('proof_of_deliveries', 'photo_path')) {
+                $urlUpdates['photo_path'] = json_encode($photoUrls);
+            }
+
+            if (Schema::hasColumn('proof_of_deliveries', 'signature_url')) {
+                $urlUpdates['signature_url'] = $signatureUrl;
+            } elseif (Schema::hasColumn('proof_of_deliveries', 'signature_path')) {
+                $urlUpdates['signature_path'] = $signatureUrl;
+            }
+
+            if (!empty($urlUpdates)) {
+                $pod->update($urlUpdates);
+            }
 
             $shipmentModel->update([
                 'status' => 'Delivered',
@@ -158,7 +218,7 @@ class PodController extends Controller
             return response()->json([
                 'success' => true,
                 'message' => 'Proof of Delivery berhasil disimpan.',
-                'data'    => $pod->fresh(),
+                'data'    => $pod->fresh()->makeHidden(['photo_data', 'signature_data']),
             ], 201);
         });
     }

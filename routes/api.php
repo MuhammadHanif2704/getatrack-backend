@@ -23,6 +23,10 @@ use Illuminate\Support\Facades\Route;
 Route::post('/login', [AuthController::class, 'login']);
 Route::post('/admin/login', [AdminAuthController::class, 'login']);
 
+// Media POD (Foto & Tanda Tangan) agar bisa dimuat langsung oleh Flutter & Web Admin
+Route::get('/pods/{pod}/photo/{index?}', [PodController::class, 'photo']);
+Route::get('/pods/{pod}/signature', [PodController::class, 'signature']);
+
 // =============================================================================
 // PROTECTED ENDPOINTS (SANCTUM BEARER TOKEN)
 // =============================================================================
