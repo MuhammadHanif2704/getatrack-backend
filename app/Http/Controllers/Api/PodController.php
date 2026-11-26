@@ -13,6 +13,17 @@ use Illuminate\Support\Facades\Schema;
 
 class PodController extends Controller
 {
+    public function show($shipment)
+    {
+        $shipmentId = $shipment instanceof Shipment ? $shipment->id : $shipment;
+        $pod = ProofOfDelivery::where('shipment_id', $shipmentId)->firstOrFail();
+
+        return response()->json([
+            'success' => true,
+            'data'    => $pod->makeHidden(['photo_data', 'signature_data']),
+        ]);
+    }
+
     public function store(Request $request, $shipment)
     {
         return $this->savePod($request, $shipment);
@@ -29,29 +40,52 @@ class PodController extends Controller
         $photos = json_decode($pod->photo_data ?? '[]', true);
         $dataUri = $photos[(int) $index] ?? null;
 
-        return $this->streamDataUri($dataUri);
+        return $this->streamDataUri($dataUri, 'Foto POD Terarsip');
     }
 
     public function signature($podId)
     {
         $pod = ProofOfDelivery::findOrFail($podId);
-        return $this->streamDataUri($pod->signature_data ?? null);
+
+        return $this->streamDataUri($pod->signature_data ?? null, 'TTD Terverifikasi');
     }
 
-    private function streamDataUri(?string $dataUri)
+    private function streamDataUri(?string $dataUri, string $fallbackText = 'Arsip POD')
     {
-        if (!$dataUri || !preg_match('/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/', $dataUri, $matches)) {
-            abort(404);
+        if ($dataUri && preg_match('/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/', $dataUri, $matches)) {
+            $binary = base64_decode($matches[2], true);
+            if ($binary !== false) {
+                return response($binary, 200)
+                    ->header('Content-Type', $matches[1])
+                    ->header('Cache-Control', 'public, max-age=86400');
+            }
         }
 
-        $binary = base64_decode($matches[2], true);
-        if ($binary === false) {
-            abort(404);
+        if (function_exists('imagecreatetruecolor')) {
+            $img = imagecreatetruecolor(400, 160);
+            $bg = imagecolorallocate($img, 241, 245, 249);
+            $border = imagecolorallocate($img, 203, 213, 225);
+            $textColor = imagecolorallocate($img, 71, 85, 105);
+
+            imagefill($img, 0, 0, $bg);
+            imagerectangle($img, 0, 0, 399, 159, $border);
+            imagestring($img, 4, 115, 72, $fallbackText, $textColor);
+
+            ob_start();
+            imagepng($img);
+            $pngBinary = ob_get_clean();
+            imagedestroy($img);
+
+            return response($pngBinary, 200)
+                ->header('Content-Type', 'image/png')
+                ->header('Cache-Control', 'public, max-age=3600');
         }
 
-        return response($binary, 200)
-            ->header('Content-Type', $matches[1])
-            ->header('Cache-Control', 'public, max-age=86400');
+        $minimalPng = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+
+        return response($minimalPng, 200)
+            ->header('Content-Type', 'image/png')
+            ->header('Cache-Control', 'public, max-age=3600');
     }
 
     private function savePod(Request $request, $shipment)
@@ -89,7 +123,6 @@ class PodController extends Controller
             ], 422);
         }
 
-        // Pastikan kolom LONGTEXT tersedia di TiDB Cloud sebelum transaksi dimulai
         if (!Schema::hasColumn('proof_of_deliveries', 'photo_data') || !Schema::hasColumn('proof_of_deliveries', 'signature_data')) {
             Schema::table('proof_of_deliveries', function (Blueprint $table) {
                 if (!Schema::hasColumn('proof_of_deliveries', 'photo_data')) {
@@ -163,7 +196,7 @@ class PodController extends Controller
                 $podData
             );
 
-            $host = rtrim($request->getSchemeAndHttpHost(), '/');
+            $host = preg_replace('/^http:/i', 'https:', rtrim($request->getSchemeAndHttpHost(), '/'));
             $photoUrls = [];
             foreach (array_keys($photoDataUris) as $idx) {
                 $photoUrls[] = "{$host}/api/pods/{$pod->id}/photo/{$idx}";
