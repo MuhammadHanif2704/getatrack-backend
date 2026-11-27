@@ -81,9 +81,29 @@ class PodController extends Controller
                 ->header('Cache-Control', 'public, max-age=3600');
         }
 
-        $minimalPng = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==');
+        // Fallback kartu PNG 320x100 pure-PHP (tanpa perlu ekstensi GD di Vercel)
+        $w = 320;
+        $h = 100;
+        $raw = '';
+        for ($y = 0; $y < $h; $y++) {
+            $raw .= "\x00";
+            $isBorder = ($y < 2 || $y >= $h - 2);
+            for ($x = 0; $x < $w; $x++) {
+                if ($isBorder || $x < 2 || $x >= $w - 2) {
+                    $raw .= "\xCB\xD5\xE1";
+                } else {
+                    $raw .= "\xF1\xF5\xF9";
+                }
+            }
+        }
+        $ihdr = pack('N2C5', $w, $h, 8, 2, 0, 0, 0);
+        $idat = gzcompress($raw);
+        $png = "\x89PNG\r\n\x1a\n"
+            . pack('N', strlen($ihdr)) . 'IHDR' . $ihdr . pack('N', crc32('IHDR' . $ihdr))
+            . pack('N', strlen($idat)) . 'IDAT' . $idat . pack('N', crc32('IDAT' . $idat))
+            . pack('N', 0) . 'IEND' . pack('N', crc32('IEND'));
 
-        return response($minimalPng, 200)
+        return response($png, 200)
             ->header('Content-Type', 'image/png')
             ->header('Cache-Control', 'public, max-age=3600');
     }
@@ -177,6 +197,14 @@ class PodController extends Controller
                 'photo_data'         => json_encode($photoDataUris),
                 'signature_data'     => $signatureDataUri,
             ];
+
+            // Isi nilai awal agar kolom NOT NULL di TiDB Cloud tidak gagal saat INSERT
+            if (Schema::hasColumn('proof_of_deliveries', 'photo_path')) {
+                $podData['photo_path'] = '[]';
+            }
+            if (Schema::hasColumn('proof_of_deliveries', 'signature_path')) {
+                $podData['signature_path'] = 'pending';
+            }
 
             if (Schema::hasColumn('proof_of_deliveries', 'courier_id')) {
                 $podData['courier_id'] = $request->user()->id;

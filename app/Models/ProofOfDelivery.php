@@ -11,6 +11,11 @@ class ProofOfDelivery extends Model
 
     protected $guarded = [];
 
+    protected $hidden = [
+        'photo_data',
+        'signature_data',
+    ];
+
     protected $casts = [
         'delivered_at' => 'datetime',
         'latitude'     => 'float',
@@ -40,6 +45,11 @@ class ProofOfDelivery extends Model
         }
 
         $clean = trim($path);
+        $clean = preg_replace('#^/?storage/(https?://|data:)#i', '$1', $clean);
+
+        if (str_starts_with($clean, 'data:') || preg_match('#^https?://#i', $clean)) {
+            return preg_replace('#^http://#i', 'https://', $clean);
+        }
 
         if (preg_match('#/storage/(.+)$#', $clean, $matches)) {
             $clean = $matches[1];

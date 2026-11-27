@@ -180,16 +180,18 @@ class AdminShipmentController extends Controller
 
         if ($shipment->proofOfDelivery && isset($data['proof_of_delivery']) && is_array($data['proof_of_delivery'])) {
             $pod = $shipment->proofOfDelivery;
-            $rawItems = [];
+            $rawItems = $pod->photo_urls;
 
-            if (method_exists($pod, 'photos') && $pod->relationLoaded('photos')) {
-                $rawItems = $pod->photos->all();
-            } elseif (is_array($pod->photos)) {
-                $rawItems = $pod->photos;
-            } elseif (is_string($pod->photos) && $pod->photos !== '') {
-                $decoded = json_decode($pod->photos, true);
-                if (is_array($decoded)) {
-                    $rawItems = $decoded;
+            if (empty($rawItems)) {
+                if (method_exists($pod, 'photos') && $pod->relationLoaded('photos')) {
+                    $rawItems = $pod->photos->all();
+                } elseif (is_array($pod->photos)) {
+                    $rawItems = $pod->photos;
+                } elseif (is_string($pod->photos) && $pod->photos !== '') {
+                    $decoded = json_decode($pod->photos, true);
+                    if (is_array($decoded)) {
+                        $rawItems = $decoded;
+                    }
                 }
             }
 
@@ -204,8 +206,10 @@ class AdminShipmentController extends Controller
                     return null;
                 }
 
+                $raw = preg_replace('#^/?storage/(https?://|data:)#i', '$1', trim($raw));
+
                 if (str_starts_with($raw, 'data:') || preg_match('#^https?://#i', $raw)) {
-                    return $raw;
+                    return preg_replace('#^http://#i', 'https://', $raw);
                 }
 
                 $cleanPath = ltrim(preg_replace('#^/?storage/#', '', $raw), '/');
@@ -216,18 +220,16 @@ class AdminShipmentController extends Controller
                 $photos = $data['proof_of_delivery']['photos'];
             }
 
-            if (empty($photos) && ! empty($pod->photo_url)) {
-                $raw = $pod->photo_url;
-                $photos = [
-                    (str_starts_with($raw, 'data:') || preg_match('#^https?://#i', $raw))
-                        ? $raw
-                        : asset('storage/' . ltrim(preg_replace('#^/?storage/#', '', $raw), '/')),
-                ];
-            }
-
             $data['proof_of_delivery']['photos'] = $photos;
             if (empty($data['proof_of_delivery']['photo_url']) && ! empty($photos[0])) {
                 $data['proof_of_delivery']['photo_url'] = $photos[0];
+            }
+
+            if (! empty($pod->signature_url) && is_string($pod->signature_url)) {
+                $sigRaw = preg_replace('#^/?storage/(https?://|data:)#i', '$1', trim($pod->signature_url));
+                $data['proof_of_delivery']['signature_url'] = (str_starts_with($sigRaw, 'data:') || preg_match('#^https?://#i', $sigRaw))
+                    ? preg_replace('#^http://#i', 'https://', $sigRaw)
+                    : asset('storage/' . ltrim(preg_replace('#^/?storage/#', '', $sigRaw), '/'));
             }
         }
 
